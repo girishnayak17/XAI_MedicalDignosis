@@ -1,9 +1,101 @@
-./covid19Dataset
-./KDataset
-./KDataset_clean
-./PDatasets
-.venv
+
+# ==========================================
+# DATASETS
+# ==========================================
+/covid19Dataset/
+/KDataset/
+/KDataset_clean/
+/KDatasets_Clean/
+/PDatasets/
+/data/
+/datasets/
+
+# Ignore datasets inside the project folder
+/XAI_MedicalDignosis/data/
+/XAI_MedicalDignosis/datasets/
+
+# ==========================================
+# VIRTUAL ENVIRONMENTS
+# ==========================================
+.venv/
+venv/
+env/
+ENV/
+/XAI_MedicalDignosis/.venv/
+
+# ==========================================
+# SECRETS
+# ==========================================
 .env
-.vscode/
-.python-version
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# ==========================================
+# PYTHON CACHE
+# ==========================================
 __pycache__/
+*.py[cod]
+*$py.class
+
+# ==========================================
+# MODEL WEIGHTS
+# ==========================================
+*.keras
+*.h5
+*.hdf5
+*.weights
+*.ckpt
+*.joblib
+*.pkl
+*.pickle
+*.onnx
+*.pt
+*.pth
+*.tflite
+saved_model/
+
+# ==========================================
+# GENERATED RESULTS
+# ==========================================
+/results/
+/logs/
+/runs/
+/outputs/
+/XAI_MedicalDignosis/results/
+/XAI_MedicalDignosis/logs/
+/XAI_MedicalDignosis/runs/
+/XAI_MedicalDignosis/outputs/
+*.log
+*.tmp
+
+# ==========================================
+# EDITORS AND OPERATING SYSTEM
+# ==========================================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==========================================
+# JUPYTER
+# ==========================================
+.ipynb_checkpoints/
+
+# ==========================================
+# ARCHIVES
+# ==========================================
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+
+# ==========================================
+# PROJECT-SPECIFIC FILES
+# ==========================================
+/XAI_MedicalDignosis/.python-version
