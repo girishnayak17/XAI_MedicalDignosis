@@ -1,0 +1,9 @@
+./covid19Dataset
+./KDataset
+./KDataset_clean
+./PDatasets
+.venv
+.env
+.vscode/
+.python-version
+__pycache__/

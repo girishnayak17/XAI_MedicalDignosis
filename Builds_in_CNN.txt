@@ -1,0 +1,10 @@
+Conv2D
+ReLU
+MaxPooling2D
+Conv2D
+ReLU
+MaxPooling2D
+GlobalAveragePooling2D
+Dense
+Dropout
+Output

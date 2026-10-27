@@ -1,0 +1,4 @@
+NIH Clinical Center : https://nihcc.app.box.com/v/ChestXray-NIHCC/folder/36938765345
+cheXpert : https://aimi.stanford.edu/datasets/chexpert-chest-x-rays?utm_source=chatgpt.com
+
+RNSA penimoina : https://www.rsna.org/education/ai-resources-and-training/ai-image-challenge/RSNA-Pneumonia-Detection-Challenge-2018?utm_source=chatgpt.com

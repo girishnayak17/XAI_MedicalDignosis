@@ -1,0 +1,55 @@
+MCA_Final_Project/
+│
+├── .venv/
+│
+├── Datasets/
+│   ├── images/
+│   ├── BBox_List_2017.csv
+│   ├── Data_Entry_2017_v2020.csv
+│   ├── test_list.txt
+│   └── train_val_list.txt
+│
+├── XAI_MedicalDiagnosis/
+│   │
+│   ├── src/
+│   │   ├── preprocessing/
+│   │   │   ├── __init__.py
+│   │   │   ├── dataset_check.py
+│   │   │   └── preprocessing.py
+│   │   │
+│   │   ├── models/
+│   │   │   ├── __init__.py
+│   │   │   ├── cnn_model.py
+│   │   │   ├── resnet50_model.py
+│   │   │   └── efficientnet_model.py
+│   │   │
+│   │   ├── explainability/
+│   │   │   ├── __init__.py
+│   │   │   ├── gradcam.py
+│   │   │   └── shap_explanation.py
+│   │   │
+│   │   └── evaluation/
+│   │       ├── __init__.py
+│   │       ├── evaluate.py
+│   │       └── metrics.py
+│   │
+│   ├── models/
+│   ├── results/
+│   │   ├── graphs/
+│   │   ├── confusion_matrix/
+│   │   ├── gradcam/
+│   │   └── shap/
+│   │
+│   ├── app/
+│   │   └── app.py
+│   │
+│   ├── check_dataset.py
+│   ├── train.py
+│   ├── config.py
+│   ├── requirements.txt
+│   └── README.md
+│
+├── Basic_Idea_medical_diagnosis.docx
+├── basic_implementation.docx
+├── Synopsis.docx
+└── dataset_download.py
