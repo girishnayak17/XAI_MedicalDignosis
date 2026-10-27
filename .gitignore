@@ -1,49 +1,38 @@
 
 # ==========================================
-# DATASETS
+# MEDICAL IMAGE DATASETS (parent directory)
 # ==========================================
 /covid19Dataset/
-/KDataset/
-/KDataset_clean/
+/Datasets/
+/KDatasets/
 /KDatasets_Clean/
 /PDatasets/
-/data/
-/datasets/
-
-# Ignore datasets inside the project folder
-/XAI_MedicalDignosis/data/
-/XAI_MedicalDignosis/datasets/
 
 # ==========================================
-# VIRTUAL ENVIRONMENTS
+# PYTHON ENVIRONMENTS
 # ==========================================
-.venv/
+/.venv/
+**/.venv/
 venv/
 env/
 ENV/
-/XAI_MedicalDignosis/.venv/
 
 # ==========================================
-# SECRETS
+# PROJECT SECRETS
 # ==========================================
-.env
-.env.*
-!.env.example
+/XAI_MedicalDignosis/.env
+/XAI_MedicalDignosis/.env.*
+!/.env.example
+!/XAI_MedicalDignosis/.env.example
 *.pem
 *.key
 credentials.json
 secrets.json
 
 # ==========================================
-# PYTHON CACHE
+# TRAINED MODELS AND CHECKPOINTS
 # ==========================================
-__pycache__/
-*.py[cod]
-*$py.class
-
-# ==========================================
-# MODEL WEIGHTS
-# ==========================================
+/XAI_MedicalDignosis/models/
 *.keras
 *.h5
 *.hdf5
@@ -56,25 +45,27 @@ __pycache__/
 *.pt
 *.pth
 *.tflite
-saved_model/
+**/saved_model/
 
 # ==========================================
 # GENERATED RESULTS
 # ==========================================
-/results/
-/logs/
-/runs/
-/outputs/
 /XAI_MedicalDignosis/results/
 /XAI_MedicalDignosis/logs/
 /XAI_MedicalDignosis/runs/
 /XAI_MedicalDignosis/outputs/
-*.log
-*.tmp
+
+# ==========================================
+# PYTHON CACHE
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
 
 # ==========================================
 # EDITORS AND OPERATING SYSTEM
 # ==========================================
+/XAI_MedicalDignosis/.vscode/
 .vscode/
 .idea/
 .DS_Store
@@ -87,8 +78,11 @@ desktop.ini
 .ipynb_checkpoints/
 
 # ==========================================
-# ARCHIVES
+# TEMPORARY FILES AND ARCHIVES
 # ==========================================
+*.log
+*.tmp
+*.temp
 *.zip
 *.7z
 *.rar
@@ -96,6 +90,6 @@ desktop.ini
 *.tar.gz
 
 # ==========================================
-# PROJECT-SPECIFIC FILES
+# LOCAL PYTHON VERSION FILE
 # ==========================================
 /XAI_MedicalDignosis/.python-version
