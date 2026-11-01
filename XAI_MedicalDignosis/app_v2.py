@@ -2,7 +2,7 @@
 """
 Explainable Chest X-Ray Classification
 
-Custom CNN + ResNet50 Transfer Learning
+Custom CNN + ResNet50 + EfficientNetB0 Transfer Learning
 Grad-CAM v2 + SHAP + Gemini LLM
 
 Academic research prototype; not a medical diagnostic tool.
@@ -53,6 +53,12 @@ MODEL_PATHS = {
         / "models"
         / "resnet50_best.keras"
     ),
+
+    "EfficientNetB0": (
+        BASE_DIR
+        / "models"
+        / "efficientnetb0_best.keras"
+    ),
 }
 
 IMAGE_SIZE = (224, 224)
@@ -66,6 +72,7 @@ CLASS_NAMES = [
 
 CNN_GRADCAM_LAYER = "activation_3"
 RESNET_GRADCAM_LAYER = "conv4_block6_out"
+EFFICIENTNET_GRADCAM_LAYER = "top_activation"
 
 SHAP_MAX_EVALS = 1000
 SHAP_BATCH_SIZE = 8
@@ -108,6 +115,16 @@ def load_selected_model(model_name):
 
         model = load_resnet50_checkpoint(
             model_path
+        )
+
+    elif model_name == "EfficientNetB0":
+
+        # EfficientNetB0 contains its own preprocessing layers.
+        # Supply RGB float32 images in the 0-255 range, just as
+        # during training. Do not apply an additional /255 here.
+        model = tf.keras.models.load_model(
+            model_path,
+            compile=False,
         )
 
     else:
@@ -163,9 +180,10 @@ def preprocess_image(pil_image):
         dtype=np.float32,
     )
 
-    # Both models receive RGB images in the 0-255 range.
+    # All three models receive RGB float32 images in the 0-255 range.
     # Custom CNN performs internal rescaling.
-    # ResNet50 performs its registered internal preprocessing.
+    # ResNet50 uses its registered preprocessing layer.
+    # EfficientNetB0 uses preprocessing within its backbone.
 
     return image_array, image_array[None, ...]
 
@@ -429,6 +447,34 @@ def get_gradcam_layer_options(model_name):
 
         return options
 
+    if model_name == "EfficientNetB0":
+        model = load_selected_model(model_name)
+        backbone = model.get_layer("efficientnetb0")
+
+        preferred = [
+            EFFICIENTNET_GRADCAM_LAYER,
+            "block6d_add",
+            "block5c_add",
+        ]
+
+        available = {
+            layer.name
+            for layer in backbone.layers
+            if len(getattr(layer.output, "shape", ())) == 4
+        }
+
+        options = [name for name in preferred if name in available]
+
+        if not options:
+            spatial_layers = [
+                layer.name
+                for layer in backbone.layers
+                if len(getattr(layer.output, "shape", ())) == 4
+            ]
+            options = spatial_layers[-5:]
+
+        return options
+
     raise ValueError(f"Unsupported model: {model_name}")
 
 
@@ -502,6 +548,51 @@ def load_gradcam_model(model_name, layer_name):
             inputs=model_input,
             outputs=[feature_maps, class_scores],
             name=f"gradcam_resnet50_{layer_name}",
+        )
+
+    if model_name == "EfficientNetB0":
+        try:
+            backbone = model.get_layer("efficientnetb0")
+            feature_layer = backbone.get_layer(layer_name)
+
+            gap_layer = model.get_layer("global_average_pooling")
+            bn_layer = model.get_layer("classifier_batch_normalization")
+            dropout_layer = model.get_layer("classifier_dropout")
+            classifier_layer = model.get_layer("four_class_classifier")
+        except ValueError as exc:
+            raise ValueError(
+                f"A required EfficientNetB0 Grad-CAM layer was not found: {exc}"
+            ) from exc
+
+        if len(feature_layer.output.shape) != 4:
+            raise ValueError(
+                f"Layer '{layer_name}' does not produce a spatial feature map."
+            )
+
+        # EfficientNetB0 includes its preprocessing inside the backbone.
+        # Reuse the same backbone call for the selected activation and
+        # final feature tensor, then reuse the trained classifier head.
+        backbone_with_features = tf.keras.Model(
+            inputs=backbone.input,
+            outputs=[feature_layer.output, backbone.output],
+            name=f"efficientnetb0_features_{layer_name}",
+        )
+
+        model_input = model.inputs[0]
+        feature_maps, backbone_output = backbone_with_features(
+            model_input,
+            training=False,
+        )
+
+        x = gap_layer(backbone_output)
+        x = bn_layer(x, training=False)
+        x = dropout_layer(x, training=False)
+        class_scores = classifier_layer(x)
+
+        return tf.keras.Model(
+            inputs=model_input,
+            outputs=[feature_maps, class_scores],
+            name=f"gradcam_efficientnetb0_{layer_name}",
         )
 
     raise ValueError(f"Unsupported model: {model_name}")
@@ -626,8 +717,8 @@ st.title(
 )
 
 st.write(
-    "Four-class chest X-ray classification using a CNN, "
-    "ResNet50 transfer learning, Grad-CAM v2, SHAP visual "
+    "Four-class chest X-ray classification using a Custom CNN, "
+    "ResNet50 and EfficientNetB0, Grad-CAM v2, SHAP visual "
     "explanations, and a Gemini-generated educational explanation."
 )
 
@@ -646,12 +737,13 @@ st.warning(
 with st.expander("About this model"):
 
     st.markdown("""
-This application uses two deep learning models:
+This application uses three deep learning models:
 
 - **Custom CNN**
 - **ResNet50 Transfer Learning**
+- **EfficientNetB0 Transfer Learning**
 
-Both models classify chest X-rays into four classes:
+All three models classify chest X-rays into four classes:
 
 - **Normal**
 - **Pneumonia**
@@ -686,7 +778,7 @@ with st.expander("Model evaluation results"):
         "generated for an individual uploaded X-ray."
     )
 
-    cnn_col, resnet_col = st.columns(2)
+    cnn_col, resnet_col, efficientnet_col = st.columns(3)
 
     # --------------------------------------------------------
     # CUSTOM CNN
@@ -770,13 +862,53 @@ with st.expander("Model evaluation results"):
 
         st.write("COVID-19: 99.17%")
 
+    # --------------------------------------------------------
+    # EFFICIENTNETB0
+    # --------------------------------------------------------
+
+    with efficientnet_col:
+
+        st.subheader("EfficientNetB0 Transfer Learning")
+
+        st.metric(
+            "Test accuracy",
+            "99.56%",
+        )
+
+        st.metric(
+            "Macro precision",
+            "99.55%",
+        )
+
+        st.metric(
+            "Macro recall",
+            "99.63%",
+        )
+
+        st.metric(
+            "Macro F1-score",
+            "99.59%",
+        )
+
+        st.metric(
+            "ROC-AUC",
+            "99.99%",
+        )
+
+        st.markdown("**Class-wise recall**")
+        st.write("Normal: 100.00%")
+        st.write("Pneumonia: 100.00%")
+        st.write("Tuberculosis: 98.79%")
+        st.write("COVID-19: 99.72%")
+
     st.divider()
 
     st.warning(
-        "The two models' metrics were recorded from different "
-        "evaluation runs. They should not be considered a "
-        "definitive head-to-head comparison until both models "
-        "are evaluated on the exact same held-out test images."
+        "The three models' metrics were recorded from separate "
+        "evaluation runs and may use different test splits. They "
+        "must not be treated as a definitive head-to-head comparison "
+        "until all models are evaluated on the exact same held-out "
+        "images with consistent patient-level splitting and leakage checks."
     )
 
     st.caption(
@@ -894,7 +1026,7 @@ if uploaded_file is not None:
                 )
 
             # ------------------------------------------------
-            # RUN BOTH MODELS
+            # RUN ALL AVAILABLE MODELS
             # ------------------------------------------------
 
             with st.spinner(
@@ -964,16 +1096,14 @@ if uploaded_file is not None:
                 "Scores for all classes"
             )
 
-            cnn_col, resnet_col = st.columns(2)
+            model_columns = st.columns(len(all_predictions))
 
-            model_columns = {
-                "Custom CNN": cnn_col,
-                "ResNet50": resnet_col,
-            }
+            for (model_name, predictions), model_column in zip(
+                all_predictions.items(),
+                model_columns,
+            ):
 
-            for model_name, predictions in all_predictions.items():
-
-                with model_columns[model_name]:
+                with model_column:
 
                     st.markdown(
                         f"**{model_name}**"
@@ -1019,11 +1149,12 @@ if uploaded_file is not None:
                     f"No spatial Grad-CAM layers were found for {selected_model_name}."
                 )
 
-            preferred_default = (
-                CNN_GRADCAM_LAYER
-                if selected_model_name == "Custom CNN"
-                else RESNET_GRADCAM_LAYER
-            )
+            preferred_defaults = {
+                "Custom CNN": CNN_GRADCAM_LAYER,
+                "ResNet50": RESNET_GRADCAM_LAYER,
+                "EfficientNetB0": EFFICIENTNET_GRADCAM_LAYER,
+            }
+            preferred_default = preferred_defaults[selected_model_name]
 
             default_layer = (
                 preferred_default

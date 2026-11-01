@@ -1,19 +1,12 @@
 
 import os
-
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 from pathlib import Path
-import argparse
 
 import cv2
 import numpy as np
 import tensorflow as tf
-from PIL import Image
-
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
 
 # ============================================================
@@ -22,18 +15,13 @@ import matplotlib.pyplot as plt
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-MODEL_PATH = (
-    BASE_DIR
-    / "models"
-    / "kaggle_chest_xray_covid4_best.keras"
-)
+MODEL_PATHS = {
+    "Custom CNN": BASE_DIR / "models" / "kaggle_chest_xray_covid4_best.keras",
+    "ResNet50": BASE_DIR / "models" / "resnet50_best.keras",
+    "EfficientNetB0": BASE_DIR / "models" / "efficientnetb0_best.keras",
+}
 
-OUTPUT_DIR = (
-    BASE_DIR
-    / "results"
-    / "gradcam_v2"
-    / "standalone"
-)
+IMAGE_SIZE = (224, 224)
 
 CLASS_NAMES = [
     "Normal",
@@ -42,137 +30,304 @@ CLASS_NAMES = [
     "COVID-19",
 ]
 
-IMAGE_SIZE = (224, 224)
-DEFAULT_LAYER = "activation_3"
+DEFAULT_LAYERS = {
+    "Custom CNN": "activation_3",
+    "ResNet50": "conv4_block6_out",
+    "EfficientNetB0": "top_activation",
+}
+
+BACKBONE_NAMES = {
+    "ResNet50": "resnet50",
+    "EfficientNetB0": "efficientnetb0",
+}
 
 
 # ============================================================
-# GPU AND MODEL
+# MODEL LOADING
 # ============================================================
 
-def load_model_and_grad_model(layer_name=DEFAULT_LAYER):
-    """Load the existing model and expose its feature maps."""
+def load_classification_model(model_name):
+    """Load the requested trained model."""
 
-    if not MODEL_PATH.is_file():
+    if model_name not in MODEL_PATHS:
+        raise ValueError(f"Unsupported model: {model_name}")
+
+    model_path = MODEL_PATHS[model_name]
+
+    if not model_path.is_file():
         raise FileNotFoundError(
-            f"Model not found: {MODEL_PATH}"
+            f"{model_name} checkpoint not found: {model_path}"
         )
 
-    gpus = tf.config.list_physical_devices("GPU")
-
-    if not gpus:
-        raise RuntimeError(
-            "TensorFlow cannot detect a GPU. "
-            "Check the existing WSL GPU environment."
+    if model_name == "Custom CNN":
+        model = tf.keras.models.load_model(
+            model_path,
+            compile=False,
         )
 
-    for gpu in gpus:
+    elif model_name == "ResNet50":
+        from src.transfer_learning.models import (
+            load_resnet50_checkpoint
+        )
+
+        model = load_resnet50_checkpoint(model_path)
+
+    elif model_name == "EfficientNetB0":
+        from src.transfer_learning.efficientnetb0 import (
+            load_efficientnetb0_checkpoint
+        )
+
+        model = load_efficientnetb0_checkpoint(model_path)
+
+    if model.output_shape[-1] != len(CLASS_NAMES):
+        raise ValueError(
+            f"{model_name} must produce {len(CLASS_NAMES)} class scores."
+        )
+
+    return model
+
+
+# ============================================================
+# DISCOVER AVAILABLE GRAD-CAM LAYERS
+# ============================================================
+
+def get_gradcam_layer_options(model, model_name):
+    """Discover actual spatial layers in the selected architecture."""
+
+    if model_name == "Custom CNN":
+
+        spatial_layers = [
+            layer.name
+            for layer in model.layers
+            if len(getattr(layer.output, "shape", ())) == 4
+        ]
+
+    elif model_name in BACKBONE_NAMES:
+
+        backbone = model.get_layer(
+            BACKBONE_NAMES[model_name]
+        )
+
+        spatial_layers = [
+            layer.name
+            for layer in backbone.layers
+            if len(getattr(layer.output, "shape", ())) == 4
+            and layer.name != "input_layer"
+        ]
+
+    else:
+        raise ValueError(f"Unsupported model: {model_name}")
+
+    preferred = {
+        "Custom CNN": [
+            "activation_3",
+            "conv2d_3",
+        ],
+        "ResNet50": [
+            "conv4_block6_out",
+            "conv5_block3_out",
+        ],
+        "EfficientNetB0": [
+            "top_activation",
+            "block6d_add",
+            "block5c_add",
+        ],
+    }
+
+    options = [
+        name
+        for name in preferred[model_name]
+        if name in spatial_layers
+    ]
+
+    # Include the actual spatial layers as alternatives.
+    if not options:
+        options = spatial_layers[-5:]
+
+    return options
+
+
+# ============================================================
+# CONNECTED GRAD-CAM GRAPH
+# ============================================================
+
+def build_gradcam_model(model, model_name, layer_name):
+    """
+    Build a Grad-CAM model connected to the original classifier.
+
+    Custom CNN:
+        Direct intermediate layer and original model output.
+
+    ResNet50:
+        Preprocessing -> backbone -> trained classifier head.
+
+    EfficientNetB0:
+        Backbone (including its internal preprocessing)
+        -> trained classifier head.
+    """
+
+    # --------------------------------------------------------
+    # CUSTOM CNN
+    # --------------------------------------------------------
+
+    if model_name == "Custom CNN":
+
         try:
-            tf.config.experimental.set_memory_growth(
-                gpu, True
+            feature_layer = model.get_layer(layer_name)
+        except ValueError as exc:
+            raise ValueError(
+                f"Grad-CAM layer '{layer_name}' not found in Custom CNN."
+            ) from exc
+
+        if len(feature_layer.output.shape) != 4:
+            raise ValueError(
+                f"Layer '{layer_name}' is not a spatial feature layer."
             )
-        except RuntimeError as exc:
-            print("GPU memory-growth setting:", exc)
 
-    print("TensorFlow:", tf.__version__)
-    print("Available GPU(s):", gpus)
-    print("Loading existing trained model...")
+        return tf.keras.Model(
+            inputs=model.inputs,
+            outputs=[
+                feature_layer.output,
+                model.output,
+            ],
+            name=f"gradcam_cnn_{layer_name}",
+        )
 
-    model = tf.keras.models.load_model(
-        MODEL_PATH,
-        compile=False,
-    )
+    # --------------------------------------------------------
+    # RESNET50 / EFFICIENTNETB0
+    # --------------------------------------------------------
+
+    if model_name not in BACKBONE_NAMES:
+        raise ValueError(f"Unsupported model: {model_name}")
+
+    backbone_name = BACKBONE_NAMES[model_name]
 
     try:
-        feature_layer = model.get_layer(layer_name)
+        backbone = model.get_layer(backbone_name)
+        feature_layer = backbone.get_layer(layer_name)
+
+        gap_layer = model.get_layer("global_average_pooling")
+        bn_layer = model.get_layer("classifier_batch_normalization")
+        dropout_layer = model.get_layer("classifier_dropout")
+        classifier_layer = model.get_layer("four_class_classifier")
+
     except ValueError as exc:
-        available = [
-            layer.name for layer in model.layers
-        ]
         raise ValueError(
-            f"Layer '{layer_name}' was not found. "
-            f"Available layers: {available}"
+            f"Could not construct {model_name} Grad-CAM graph: {exc}"
         ) from exc
 
     if len(feature_layer.output.shape) != 4:
         raise ValueError(
-            f"Layer '{layer_name}' must produce a "
-            "four-dimensional spatial feature map."
+            f"Layer '{layer_name}' does not produce spatial feature maps."
         )
 
-    grad_model = tf.keras.Model(
-        inputs=model.inputs,
+    # Expose the selected intermediate feature maps and final
+    # backbone output from the SAME backbone invocation.
+    backbone_with_features = tf.keras.Model(
+        inputs=backbone.input,
         outputs=[
             feature_layer.output,
-            model.output,
+            backbone.output,
         ],
-        name="gradcam_v2_model",
+        name=f"{model_name.lower()}_features_{layer_name}",
     )
 
-    print("Model loaded:", MODEL_PATH)
-    print("Input shape:", model.input_shape)
-    print("Output shape:", model.output_shape)
-    print("Grad-CAM layer:", layer_name)
+    model_input = model.inputs[0]
+
+    # ResNet50 has an external preprocessing layer.
+    if model_name == "ResNet50":
+
+        preprocessing_layer = model.get_layer(
+            "resnet50_preprocessing"
+        )
+
+        backbone_input = preprocessing_layer(model_input)
+
+    else:
+        # EfficientNetB0 contains its own preprocessing layers.
+        # Pass the original 0-255 RGB input directly.
+        backbone_input = model_input
+
+    feature_maps, backbone_output = backbone_with_features(
+        backbone_input,
+        training=False,
+    )
+
+    # Reuse the exact trained classifier head.
+    x = gap_layer(backbone_output)
+    x = bn_layer(x, training=False)
+    x = dropout_layer(x, training=False)
+
+    class_scores = classifier_layer(x)
+
+    grad_model = tf.keras.Model(
+        inputs=model_input,
+        outputs=[
+            feature_maps,
+            class_scores,
+        ],
+        name=f"gradcam_{model_name.lower()}_{layer_name}",
+    )
 
     return grad_model
 
 
 # ============================================================
-# IMAGE LOADING
+# PREDICTION EQUIVALENCE VALIDATION
 # ============================================================
 
-def load_xray(image_path, image_size=IMAGE_SIZE):
-    """Load an RGB X-ray without changing the model's input scale."""
+def validate_gradcam_graph(
+    model,
+    grad_model,
+    input_tensor,
+    tolerance=1e-5,
+):
+    """
+    Ensure reconstructed Grad-CAM graph gives the same
+    predictions as the original classification model.
+    """
 
-    image_path = Path(image_path)
+    original_scores = model(
+        input_tensor,
+        training=False,
+    )
 
-    if not image_path.is_file():
-        raise FileNotFoundError(
-            f"X-ray image not found: {image_path}"
+    feature_maps, grad_scores = grad_model(
+        input_tensor,
+        training=False,
+    )
+
+    difference = float(
+        tf.reduce_max(
+            tf.abs(original_scores - grad_scores)
+        ).numpy()
+    )
+
+    print("\nGrad-CAM graph validation")
+    print("Feature map shape:", tuple(feature_maps.shape))
+    print("Original scores:", original_scores.numpy())
+    print("Grad-CAM scores:", grad_scores.numpy())
+    print("Maximum prediction difference:", difference)
+
+    if difference > tolerance:
+        raise RuntimeError(
+            "Grad-CAM graph does not reproduce the original model "
+            f"predictions. Difference: {difference}"
         )
 
-    with Image.open(image_path) as source:
-        original = np.asarray(
-            source.convert("RGB"),
-            dtype=np.uint8,
-        ).copy()
-
-    resized = Image.fromarray(original).resize(
-        image_size,
-        Image.Resampling.BILINEAR,
-    )
-
-    input_array = np.asarray(
-        resized,
-        dtype=np.float32,
-    )
-
-    # The model contains Rescaling(1/255).
-    # Therefore, retain pixel values in the 0-255 range.
-    input_tensor = input_array[None, ...]
-
-    return original, input_tensor
+    return difference
 
 
 # ============================================================
-# GRAD-CAM
+# GRAD-CAM GENERATION
 # ============================================================
 
 def generate_gradcam(
     input_tensor,
     grad_model,
-    class_index=None,
+    class_index,
 ):
-    """
-    Generate Grad-CAM for the selected class.
-
-    If class_index is None, explain the predicted class.
-
-    Returns:
-        heatmap: normalized raw heatmap in [0, 1]
-        class_index: explained class index
-        class_scores: model output scores
-    """
+    """Calculate raw Grad-CAM for the specified class."""
 
     image_tensor = tf.convert_to_tensor(
         input_tensor,
@@ -180,26 +335,20 @@ def generate_gradcam(
     )
 
     with tf.GradientTape() as tape:
+
         feature_maps, predictions = grad_model(
             image_tensor,
             training=False,
         )
 
-        if class_index is None:
-            class_index = int(
-                tf.argmax(predictions[0]).numpy()
-            )
-
         class_index = int(class_index)
 
         if not 0 <= class_index < len(CLASS_NAMES):
-            raise ValueError(
-                f"class_index must be between 0 and "
-                f"{len(CLASS_NAMES) - 1}."
-            )
+            raise ValueError("Invalid class index.")
 
-        # Use the selected model output as the target score.
-        target_score = predictions[:, class_index]
+        target_score = tf.reduce_sum(
+            predictions[:, class_index]
+        )
 
     gradients = tape.gradient(
         target_score,
@@ -208,8 +357,7 @@ def generate_gradcam(
 
     if gradients is None:
         raise RuntimeError(
-            "Gradients are None. Check the selected layer "
-            "and the model's computational graph."
+            "Grad-CAM gradients are disconnected."
         )
 
     if not bool(
@@ -218,56 +366,60 @@ def generate_gradcam(
         ).numpy()
     ):
         raise RuntimeError(
-            "Non-finite gradients were detected."
+            "Non-finite Grad-CAM gradients were detected."
         )
 
-    # Average gradients spatially to calculate channel weights.
     channel_weights = tf.reduce_mean(
         gradients,
         axis=(1, 2),
     )
 
-    # Weighted sum of the feature maps.
     cam = tf.reduce_sum(
         feature_maps[0]
         * channel_weights[0][None, None, :],
         axis=-1,
     )
 
-    # Keep positive contributions.
-    cam = tf.nn.relu(cam)
+    cam = tf.nn.relu(cam).numpy().astype(np.float32)
 
-    heatmap = cam.numpy().astype(np.float32)
-
-    # Resize to the model input dimensions.
-    heatmap = cv2.resize(
-        heatmap,
+    cam = cv2.resize(
+        cam,
         (IMAGE_SIZE[1], IMAGE_SIZE[0]),
         interpolation=cv2.INTER_CUBIC,
     )
 
-    heatmap = np.maximum(heatmap, 0.0)
-
-    heatmap = np.nan_to_num(
-        heatmap,
+    cam = np.nan_to_num(
+        cam,
         nan=0.0,
         posinf=0.0,
         neginf=0.0,
     )
 
-    # Normalize safely.
-    maximum = float(heatmap.max())
+    cam = np.maximum(cam, 0.0)
 
-    if maximum > 1e-8:
-        heatmap /= maximum
-    else:
-        print(
-            "WARNING: Grad-CAM produced an all-zero heatmap."
+    diagnostics = {
+        "feature_shape": tuple(feature_maps.shape),
+        "gradient_shape": tuple(gradients.shape),
+        "gradient_max": float(
+            tf.reduce_max(tf.abs(gradients)).numpy()
+        ),
+        "gradient_std": float(
+            tf.math.reduce_std(gradients).numpy()
+        ),
+        "raw_cam_max": float(cam.max()),
+        "raw_cam_mean": float(cam.mean()),
+        "raw_cam_std": float(cam.std()),
+    }
+
+    if diagnostics["raw_cam_max"] <= 1e-12:
+        raise RuntimeError(
+            "Grad-CAM produced an all-zero positive heatmap. "
+            f"Diagnostics: {diagnostics}"
         )
 
-    class_scores = predictions[0].numpy()
+    cam /= diagnostics["raw_cam_max"]
 
-    return heatmap, class_index, class_scores
+    return cam, predictions[0].numpy(), diagnostics
 
 
 # ============================================================
@@ -289,17 +441,21 @@ def enhance_heatmap(heatmap):
         neginf=0.0,
     )
 
-    heatmap = np.clip(heatmap, 0.0, 1.0)
+    heatmap = np.clip(
+        heatmap,
+        0.0,
+        1.0,
+    )
 
     positive = heatmap[heatmap > 1e-8]
 
     if positive.size == 0:
-        print(
-            "WARNING: No positive Grad-CAM activations."
-        )
+        print("WARNING: No positive Grad-CAM activations.")
         return np.zeros_like(heatmap)
 
-    upper = float(np.percentile(positive, 99))
+    upper = float(
+        np.percentile(positive, 99)
+    )
 
     if upper <= 1e-8:
         upper = float(positive.max())
@@ -310,10 +466,11 @@ def enhance_heatmap(heatmap):
         1.0,
     )
 
-    # Make weaker activations more visible.
-    heatmap = np.power(heatmap, 0.75)
+    heatmap = np.power(
+        heatmap,
+        0.75,
+    )
 
-    # Smooth the visualization slightly.
     heatmap = cv2.GaussianBlur(
         heatmap,
         (0, 0),
@@ -337,18 +494,10 @@ def create_overlay(
     alpha=0.55,
     colormap=cv2.COLORMAP_JET,
 ):
-    """
-    Create a classic colored heatmap and blend it with
-    the original X-ray.
-
-    Returns:
-        overlay_rgb, colored_heatmap_rgb
-    """
+    """Create a colored Grad-CAM heatmap and RGB overlay."""
 
     if not 0.0 <= alpha <= 1.0:
-        raise ValueError(
-            "alpha must be between 0 and 1."
-        )
+        raise ValueError("alpha must be between 0 and 1.")
 
     original = np.asarray(
         original_image,
@@ -395,7 +544,6 @@ def create_overlay(
         heatmap * 255.0
     ).astype(np.uint8)
 
-    # Classic blue-green-yellow-red color map.
     colored_bgr = cv2.applyColorMap(
         heatmap_uint8,
         colormap,
@@ -406,7 +554,6 @@ def create_overlay(
         cv2.COLOR_BGR2RGB,
     )
 
-    # Strong activations are more opaque than weak activations.
     strength = np.clip(
         (heatmap - 0.02) / 0.98,
         0.0,
@@ -418,10 +565,8 @@ def create_overlay(
     )[..., None]
 
     overlay = (
-        original.astype(np.float32)
-        * (1.0 - alpha_map)
-        + colored_rgb.astype(np.float32)
-        * alpha_map
+        original.astype(np.float32) * (1.0 - alpha_map)
+        + colored_rgb.astype(np.float32) * alpha_map
     )
 
     overlay = np.clip(
@@ -434,22 +579,50 @@ def create_overlay(
 
 
 # ============================================================
-# SAVE RESULTS
+# COMMON GRAD-CAM V2 INTERFACE
 # ============================================================
 
-def save_results(
-    image_path,
-    original,
-    raw_heatmap,
+def generate_gradcam_v2(
+    input_tensor,
+    original_image,
     class_index,
-    class_scores,
-    alpha=0.55,
+    model_name,
+    layer_name=None,
+    alpha=0.45,
+    model=None,
+    return_details=False,
 ):
-    """Save the raw heatmap and all display images."""
+    """
+    Common Grad-CAM v2 interface for Custom CNN,
+    ResNet50 and EfficientNetB0.
 
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
+    The caller may pass an already-loaded model.
+    """
+
+    if model is None:
+        model = load_classification_model(model_name)
+
+    if layer_name is None:
+        layer_name = DEFAULT_LAYERS[model_name]
+
+    grad_model = build_gradcam_model(
+        model,
+        model_name,
+        layer_name,
+    )
+
+    # Validate that the reconstructed graph follows the
+    # original model's prediction path.
+    difference = validate_gradcam_graph(
+        model,
+        grad_model,
+        input_tensor,
+    )
+
+    raw_heatmap, class_scores, diagnostics = generate_gradcam(
+        input_tensor,
+        grad_model,
+        class_index,
     )
 
     enhanced_heatmap = enhance_heatmap(
@@ -457,216 +630,52 @@ def save_results(
     )
 
     overlay, colored_heatmap = create_overlay(
-        original,
+        original_image,
         enhanced_heatmap,
         alpha=alpha,
     )
 
-    stem = Path(image_path).stem
-
-    original_path = (
-        OUTPUT_DIR / f"{stem}_original.png"
+    original = np.asarray(
+        original_image,
+        dtype=np.uint8,
     )
 
-    raw_path = (
-        OUTPUT_DIR / f"{stem}_raw_gradcam.npy"
+    pixel_difference = float(
+        np.mean(
+            np.abs(
+                overlay.astype(np.float32)
+                - original.astype(np.float32)
+            )
+        )
     )
 
-    heatmap_path = (
-        OUTPUT_DIR / f"{stem}_heatmap.png"
-    )
+    diagnostics.update({
+        "model": model_name,
+        "layer": layer_name,
+        "prediction_difference": difference,
+        "overlay_pixel_difference": pixel_difference,
+    })
 
-    overlay_path = (
-        OUTPUT_DIR / f"{stem}_overlay.png"
-    )
+    print("\n========== GRAD-CAM V2 DIAGNOSTICS ==========")
 
-    comparison_path = (
-        OUTPUT_DIR / f"{stem}_comparison.png"
-    )
+    for key, value in diagnostics.items():
+        print(f"{key}: {value}")
 
-    Image.fromarray(original).save(
-        original_path
-    )
+    print("==============================================\n")
 
-    # Save the raw normalized Grad-CAM separately.
-    np.save(
-        raw_path,
-        raw_heatmap,
-    )
+    if pixel_difference < 0.1:
+        raise RuntimeError(
+            "Grad-CAM overlay is almost identical to the original image."
+        )
 
-    Image.fromarray(colored_heatmap).save(
-        heatmap_path
-    )
-
-    Image.fromarray(overlay).save(
-        overlay_path
-    )
-
-    # Three-panel comparison.
-    fig, axes = plt.subplots(
-        1,
-        3,
-        figsize=(16, 6),
-    )
-
-    axes[0].imshow(original)
-    axes[0].set_title("Original Chest X-ray")
-
-    axes[1].imshow(colored_heatmap)
-    axes[1].set_title("Grad-CAM Heatmap")
-
-    axes[2].imshow(overlay)
-    axes[2].set_title("Grad-CAM Overlay")
-
-    confidence = float(
-        class_scores[class_index]
-    ) * 100.0
-
-    fig.suptitle(
-        f"Predicted class: {CLASS_NAMES[class_index]} "
-        f"| Model score: {confidence:.1f}%",
-        fontsize=13,
-    )
-
-    for axis in axes:
-        axis.axis("off")
-
-    fig.tight_layout(
-        rect=(0, 0, 1, 0.92)
-    )
-
-    fig.savefig(
-        comparison_path,
-        dpi=180,
-        bbox_inches="tight",
-    )
-
-    plt.close(fig)
-
-    print("\nSaved results:")
-    print("Original:  ", original_path)
-    print("Heatmap:   ", heatmap_path)
-    print("Overlay:   ", overlay_path)
-    print("Comparison:", comparison_path)
-    print("Raw values:", raw_path)
-    print("Output directory:", OUTPUT_DIR)
+    if return_details:
+        return {
+            "overlay": overlay,
+            "heatmap": enhanced_heatmap,
+            "colored_heatmap": colored_heatmap,
+            "raw_heatmap": raw_heatmap,
+            "class_scores": class_scores,
+            "diagnostics": diagnostics,
+        }
 
     return overlay
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-    parser = argparse.ArgumentParser(
-        description=(
-            "Generate a standalone Grad-CAM v2 "
-            "visualization for a chest X-ray."
-        )
-    )
-
-    parser.add_argument(
-        "image",
-        help="Path to the chest X-ray image.",
-    )
-
-    parser.add_argument(
-        "--layer",
-        default=DEFAULT_LAYER,
-        help=(
-            "Spatial feature layer to explain "
-            "(default: activation_3)."
-        ),
-    )
-
-    parser.add_argument(
-        "--alpha",
-        type=float,
-        default=0.55,
-        help=(
-            "Maximum heatmap overlay opacity, from 0 to 1."
-        ),
-    )
-
-    args = parser.parse_args()
-
-    if not 0.0 <= args.alpha <= 1.0:
-        parser.error("--alpha must be between 0 and 1.")
-
-    image_path = Path(args.image)
-
-    if not image_path.is_file():
-        raise FileNotFoundError(
-            f"X-ray image not found: {image_path}"
-        )
-
-    print("Project directory:", BASE_DIR)
-    print("Model path:", MODEL_PATH)
-    print("Input image:", image_path)
-
-    # Load the trained model and configure GPU.
-    grad_model = load_model_and_grad_model(
-        args.layer
-    )
-
-    original, input_tensor = load_xray(
-        image_path
-    )
-
-    print("\nGenerating Grad-CAM...")
-
-    heatmap, class_index, class_scores = (
-        generate_gradcam(
-            input_tensor,
-            grad_model,
-            class_index=None,
-        )
-    )
-
-    print("\nClass scores:")
-
-    for index, name in enumerate(CLASS_NAMES):
-        print(
-            f"{name:15s}: "
-            f"{float(class_scores[index]) * 100:.2f}%"
-        )
-
-    print(
-        f"\nPredicted class: {CLASS_NAMES[class_index]}"
-    )
-
-    print(
-        "Predicted-class score: "
-        f"{float(class_scores[class_index]) * 100:.2f}%"
-    )
-
-    print(
-        "Heatmap shape:", heatmap.shape
-    )
-
-    print(
-        "Heatmap min/max:",
-        float(heatmap.min()),
-        float(heatmap.max()),
-    )
-
-    print(
-        "Heatmap standard deviation:",
-        float(heatmap.std()),
-    )
-
-    save_results(
-        image_path=image_path,
-        original=original,
-        raw_heatmap=heatmap,
-        class_index=class_index,
-        class_scores=class_scores,
-        alpha=args.alpha,
-    )
-
-    print("\nGrad-CAM v2 completed.")
-
-
-if __name__ == "__main__":
-    main()
